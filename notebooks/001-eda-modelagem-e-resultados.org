@@ -1,18 +1,9 @@
 #+TITLE: arXiv Citation Graph — EDA, Modelagem e Resultados
 #+AUTHOR: Nicolas
 #+PROPERTY: header-args:python :session arxiv
-#+OPTIONS: toc:2 num:t
+#+OPTIONS: toc:2 num:t    
 
-* Prelúdio
-- Para saber mais informações sobre o /script orquestrador/ que manipula todo o sistema de coleta, limpeza e processamento dos dados, bem como treinamento, coleção de métricas e alimentação dos /notebooks/ e do /dashboard/, veja
-  - o /notebook/ sobre o /script/ orquestrador [[file:001-construindo-um-script-orquestrador.org][aqui]]
-  - ou o [[file:../run.sh][próprio script, aqui]].
-- todas as outras etapas do desenvolvimento do trabalho também foram descritas por meio de documentos org-mode:
-  - (*armazenamento dos dados*) [[file:002-tipos-e-modelagem-de-dados.org][definindo tipos de dados e sua modelagem pelo banco de dados]];
-  - (*coleta, extração dos dados*) [[file:003-um-cliente-para-arXiv.org][construindo um cliente para acessar a API arXiv]];
-    
 * Introdução
-
 ** Objetivo
 Este /notebook/ é o relatório e registro do desenvolvimento do trabalho final para a disciplina Ciência de Dados (INF.../2026). Juntamente com [[file:010-planetoid-classificadores-tradicionais-vs-gnn.org][o relatório de prova de conceito sobre o /dataset/ Planetoid]], compõe a parcela descritiva do trabalho.
 
