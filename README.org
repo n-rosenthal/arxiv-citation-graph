@@ -3,6 +3,8 @@
 #+OPTIONS: toc:2 num:t ^:nil
 #+LANGUAGE: pt-BR
 
+*É necessário descompactar* =arxiv_continuous.tar.xz= *para ter acesso ao banco de dados desenvolvido para armazenamento e criação do grafo de citações no projeto*, devido ao limite de tamanho de arquivos do GitHub.
+
 Este projeto constitui o trabalho final da disciplina de Ciência de Dados (INF 1090), no semestre 2026-1.
 Seu objetivo principal é estudar redes neurais baseadas em grafos e comparar seus resultados enquanto modelos de classificação contra estratégias clássicas, baseadas em [[https://en.wikipedia.org/wiki/Tf%E2%80%93idf][TF-IDF]] ou [[https://en.wikipedia.org/wiki/Word_embedding][word embeddings]].
 
