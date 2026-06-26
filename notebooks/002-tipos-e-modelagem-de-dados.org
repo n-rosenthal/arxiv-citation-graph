@@ -1,0 +1,223 @@
+#+title: Modelagem dos Dados
+#+author: Nícolas Rosenthal Dal Corso
+
+Nossa matéria-prima são artigos científicos e seus metadados. Esses documentos são extraídos ou de /datasets/ conhecidos, ou, e principalmente, do [[https://arxiv.org/][arXiv.org]]. Precisamos então, antes de tudo,
+
+1. estabelecer uma maneira padronizada de /armazenzar/ os dados de forma estruturada; e
+2. definir a estrutura de entrada, isto é, formular os dados dos artigos científicos enquanto grafos, para os modelos de classificação.
+
+* Definindo Modelos de Dados
+Vamos construir um banco de dados básico utilizando =sqlite3=. O banco será responsável por
+
+1. Armazenar os dados dos artigos científicos em formato tabular; mas também
+    1.  especificar em *qual estado de processamento* cada artigo está; e
+    2.  armazenar informações relevantes ao /pipeline/ de processamento, não necessariamente importantes aos modelos de classificação
+2.  Armazenar as /citações/ entre artigos, que serão as arestas dos nossos grafos;
+3.  Armazenar estruturas unicamente importantes aos processos do /pipeline/: =ProcessingQueue=, a fila de processamento de documentos.
+4.  Registrar o desenvolvimento dos modelos através de =TrainingJob= e =ModelCheckpoint=; e 
+5.  Atualizar e manter as /métricas/ dos modelos e do processamento a serem exibidos no /dashboard/.
+
+Os modelos de dados para o banco de dados são definidos em =src/db/models.py=.
+
+**  Configurando =models.py=
+#+name: db-models--config
+#+begin_src python :tangle src/db/models.py
+#   Usaremos SQLAlchemy enquanto ORM para manipular
+#   nosso banco de dados sqlite
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Text, JSON
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+
+#   Registros temporais
+from datetime import datetime
+
+#   Base declarativa para todas as tabelas
+Base = declarative_base()
+#+end_src
+
+**  Modelando Artigos Científicos
+#name: db-models--paper
+#+begin_src python :tangle src/db/models.py
+class Paper(Base):
+    """Tabela de artigos científicos"""
+    __tablename__ = 'papers'
+    
+    id = Column(String(20), primary_key=True)  # arXiv ID
+    title = Column(String(500))
+    authors = Column(Text)
+    abstract = Column(Text)
+    categories = Column(String(200))
+    published_date = Column(DateTime)
+    updated_date = Column(DateTime)
+    pdf_path = Column(String(200))
+    pdf_downloaded = Column(Boolean, default=False)
+    pdf_size = Column(Integer)  # bytes
+    text_extracted = Column(Boolean, default=False)
+    references_extracted = Column(Boolean, default=False)
+    num_references = Column(Integer, default=0)
+    num_citations_in_graph = Column(Integer, default=0)  # Citações que estão no grafo
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+#+end_src
+
+1. Um artigo científico é unicamente identificado pelo seu =arXiv ID=. Todo artigo possui um identificador único na base de dados, e será este identificar utilizado também pelo nosso banco de dados.
+2. Note que toda instância possui, inicialmente, o campo /categories/. Esta será nossa /feature target/ durante o treinamento e a validação.
+3. =pdf_path=, =pdf_downloaded=, =pdf_size=, =created_at=, =updated_at= são campos utilizados pelo /pipeline/ de dados e não serão incluídos no treinamento.
+
+
+#name: db-models--citation
+#+begin_src python :tangle src/db/models.py
+class Citation(Base):
+    """Tabela de citações (arestas)"""
+    __tablename__ = 'citations'
+    
+    id = Column(Integer, primary_key=True)
+    source_id = Column(String(20), ForeignKey('papers.id'))
+    target_id = Column(String(20), ForeignKey('papers.id'))
+    found_in_text = Column(Boolean, default=True)
+    confidence = Column(Float, default=1.0)  # Confiança da extração
+    created_at = Column(DateTime, default=datetime.utcnow)
+#+end_src
+
+1. Toda citação possui um grau de /confiança/ relacionado à certeza que temos se esta citação foi extraída corretamente do texto.
+2. Uma citação é uma relação um-a-um entre artigos científicos.
+
+** Processando Artigos Científicos
+
+#+name: db-models--processing-queue
+#+begin_src python :tangle src/db/models.py
+class ProcessingQueue(Base):
+    """Fila de processamento"""
+    __tablename__ = 'processing_queue'
+    
+    id = Column(Integer, primary_key=True)
+    paper_id = Column(String(20), ForeignKey('papers.id'))
+    task_type = Column(String(50))  # 'download', 'extract_text', 'extract_refs', 'train'
+    status = Column(String(20), default='pending')  # pending, processing, completed, failed
+    priority = Column(Integer, default=5)  # 1-10, menor = maior prioridade
+    retry_count = Column(Integer, default=0)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+#+end_src
+
+** Treinando Modelos
+#+name: db-models--training-job
+#+begin_src python :tangle src/db/models.py
+class ModelCheckpoint(Base):
+    """Checkpoints de modelos treinados"""
+    __tablename__ = 'model_checkpoints'
+    
+    id = Column(Integer, primary_key=True)
+    model_name = Column(String(50))  # 'gcn', 'graphsage', 'gat'
+    version = Column(Integer)
+    accuracy = Column(Float)
+    loss = Column(Float)
+    num_nodes = Column(Integer)
+    num_edges = Column(Integer)
+    num_classes = Column(Integer)
+    training_date = Column(DateTime, default=datetime.utcnow)
+    file_path = Column(String(200))
+    metrics = Column(JSON)  # Store additional metrics
+
+class TrainingJob(Base):
+    """Jobs de treinamento"""
+    __tablename__ = 'training_jobs'
+    
+    id = Column(Integer, primary_key=True)
+    model_name = Column(String(50))
+    status = Column(String(20), default='pending')  # pending, running, completed, failed
+    params = Column(JSON)  # Hyperparameters
+    metrics = Column(JSON, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    checkpoint_id = Column(Integer, ForeignKey('model_checkpoints.id'), nullable=True)
+#+end_src
+
+**  Registrando Métricas
+#+name: db-models--training-job
+#+begin_src python :tangle src/db/models.py
+class DashboardMetrics(Base):
+    """Métricas agregadas para dashboard"""
+    __tablename__ = 'dashboard_metrics'
+    
+    id = Column(Integer, primary_key=True)
+    metric_name = Column(String(100))
+    metric_value = Column(Float)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    metadata = Column(JSON, nullable=True)
+#+end_src
+
+*   Acessando o Banco de Dados
+Após termos definido as tabelas que constituem nosso banco de dados, vamos construir o banco em si utilizando sqlite3, em =src/db/session.py=:
+
+#+name: db--session
+#+begin_src python :tangle src/db/session.py
+#   Criação de uma sessão
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+
+#   URL do banco de dados local
+DB_URL: str = r"sqlite:///data/arxiv_continuous.db?check_same_thread=False";
+"""URL de conexão ao banco de dados (SQLite),
+    considerando WAL mode para concorrência."""
+
+
+#   Obter a engine para acessar o banco
+def get_engine(db_url: str = DB_URL):
+    """Cria engine, ativa WAL mode e garante que as tabelas existam."""
+    engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False, "timeout": 30}
+    )
+    _enable_wal_mode(engine)
+    Base.metadata.create_all(engine)
+    return engine
+
+#   Configuração WAL mode para permitir concorrência no #   processamento dos artigos
+def _enable_wal_mode(engine):
+    """Ativa Write-Ahead Logging para melhor concorrência no SQLite."""
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL"))
+        conn.execute(text("PRAGMA synchronous=NORMAL"))
+        conn.commit()
+
+#   Método factory para obter sessão do banco de dados
+#   Cada worker deverá ser capaz de iniciar uma sessão
+#   e gerenciá-la sozinho
+def get_session_factory(db_url: str = "sqlite:///data/arxiv_continuous.db?check_same_thread=False"):
+    """Retorna um SessionLocal vinculado ao engine configurado."""
+    engine = get_engine(db_url)
+    return sessionmaker(bind=engine)
+#+end_src
+
+** Obtendo Acesso em Outros Módulos
+Construído dessa forma, podemos acessar o banco de dados através da /factory/ definida acima:
+
+#+name: db--access
+#+begin_src python
+from src.db.session import get_session_factory
+
+SessionLocal = get_session_factory(db_url)
+session = SessionLocal()
+#+end_src
+
+** Exportando os Módulos
+Para terminarmos de configurar o diretório =src/db=, precisamos escrever =__init__.py=, responsável por exportar nosso código:
+
+#+name: db--init
+#+begin_src python :tangle src/db/__init__.py
+# src/db/__init__.py
+from src.db.models import (
+    Base, Paper, Citation, ProcessingQueue,
+    ModelCheckpoint, TrainingJob, DashboardMetrics,
+)
+from src.db.session import get_engine, get_session_factory
+
+__all__ = [
+    "Base", "Paper", "Citation", "ProcessingQueue",
+    "ModelCheckpoint", "TrainingJob", "DashboardMetrics",
+    "get_engine", "get_session_factory",
+]
+#+end_src

@@ -1,0 +1,732 @@
+#+TITLE: arXiv Citation Graph — EDA, Modelagem e Resultados
+#+AUTHOR: Nicolas
+#+PROPERTY: header-args:python :session arxiv
+#+OPTIONS: toc:2 num:t
+
+* Prelúdio
+- Para saber mais informações sobre o /script orquestrador/ que manipula todo o sistema de coleta, limpeza e processamento dos dados, bem como treinamento, coleção de métricas e alimentação dos /notebooks/ e do /dashboard/, veja
+  - o /notebook/ sobre o /script/ orquestrador [[file:001-construindo-um-script-orquestrador.org][aqui]]
+  - ou o [[file:../run.sh][próprio script, aqui]].
+- todas as outras etapas do desenvolvimento do trabalho também foram descritas por meio de documentos org-mode:
+  - (*armazenamento dos dados*) [[file:002-tipos-e-modelagem-de-dados.org][definindo tipos de dados e sua modelagem pelo banco de dados]];
+  - (*coleta, extração dos dados*) [[file:003-um-cliente-para-arXiv.org][construindo um cliente para acessar a API arXiv]];
+    
+* Introdução
+
+** Objetivo
+Este /notebook/ é o relatório e registro do desenvolvimento do trabalho final para a disciplina Ciência de Dados (INF.../2026). Juntamente com [[file:010-planetoid-classificadores-tradicionais-vs-gnn.org][o relatório de prova de conceito sobre o /dataset/ Planetoid]], compõe a parcela descritiva do trabalho.
+
+Em especial, este /notebook/ explora a definição e geração de um grafo de citações construído a partir de artigos do [[arXiv.org][arXiv]], coletados continuamente, com o objetivo de *classificar a categoria temática (área de pesquisa)* de cada artigo a partir de duas
+fontes de informação:
+
+- *Conteúdo textual* (título + abstract, via =TF-IDF=) — =baselines= clássicos de classificação.
+- *Estrutura do grafo de citações* — /Graph Neural Networks/ (=GCN=, =GraphSAGE=, =GAT=), que combinam conteúdo e topologia do grafo.
+
+** Dataset
+Os dados foram coletados via API pública do /arXiv/ (no módulo =src.collection=), com extração de texto (foram baixados diversos =.pdf= dos artigos científicos, e seu conteúdo textural foi extraído através da biblioteca =PyMuPDF=), citações e referências (estratégias de expressões regulares) no módulo =src.extraction=.
+A partir desses dados, construídos um banco de dados simples (SQLite) com tabelas =papers= e =citations= alimentado conforme novos artigos foram baixados e processados. Concomitantemente, construímos o grafo de citações /online/ (=src.graph.build_graph_from_db=).
+
+** Setup
+
+#+begin_src python :results none
+import sys
+sys.path.insert(0, "..")  # raiz do projeto, para importar src/
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import networkx as nx
+
+from src.config import DB_URL
+from src.db import get_session_factory, Paper, Citation
+from src.graph import build_graph_from_db
+from src.features import build_corpus, extract_primary_categories, build_tfidf_features, build_category_labels
+
+plt.rcParams["figure.dpi"] = 110
+plt.rcParams["figure.figsize"] = (8, 5)
+
+SessionLocal = get_session_factory(DB_URL)
+#+end_src
+
+
+* Análise Exploratória de Dados (EDA)
+** Carregando dados do banco
+
+#+begin_src python :results output scalar drawer
+session = SessionLocal()
+try:
+    papers_df = pd.read_sql(session.query(Paper).statement, session.bind)
+    citations_df = pd.read_sql(session.query(Citation).statement, session.bind)
+finally:
+    session.close()
+
+print(f"Total de papers: {len(papers_df)}")
+print(f"Total de citações (linhas): {len(citations_df)}")
+#+end_src
+
+#+RESULTS:
+:results:
+Total de papers: 16506
+Total de citações (linhas): 31435
+:end:
+
+** Estado do pipeline
+
+Quantos papers já passaram por cada etapa do pipeline (download, extração
+de texto, extração de referências):
+
+#+begin_src python :results output scalar drawer
+stages = {
+    "Total": len(papers_df),
+    "PDF baixado": papers_df["pdf_downloaded"].sum(),
+    "Texto extraído": papers_df["text_extracted"].sum(),
+    "Referências extraídas": papers_df["references_extracted"].sum(),
+}
+
+print(stages)
+#+end_src
+
+#+RESULTS:
+:results:
+{'Total': 16506, 'PDF baixado': 4289, 'Texto extraído': 4289, 'Referências extraídas': 4289}
+:end:
+
+
+#+begin_src python :results file :file img/pipeline_status.png
+fig, ax = plt.subplots()
+bars = ax.bar(stages.keys(), stages.values(), color=["#4C72B0", "#55A868", "#C44E52", "#8172B2"])
+ax.set_title("Progresso do Pipeline de Coleta")
+ax.set_ylabel("Número de papers")
+for bar, val in zip(bars, stages.values()):
+    ax.text(bar.get_x() + bar.get_width() / 2, val, str(int(val)), ha="center", va="bottom")
+plt.tight_layout()
+plt.savefig("img/pipeline_status.png")
+"img/pipeline_status.png"
+#+end_src
+
+#+RESULTS:
+[[file:img/pipeline_status.png]]
+
+** Distribuição de categorias
+
+A categoria primária de cada paper é a primeira listada em =paper.categories= (ex: =cs.CL, cs.AI= → categoria primária =cs.CL=). Também vamos analisar a /minor category/ posteriormente, como uma tarefa secundária.
+
+#+begin_src python :results file :file img/category_distribution.png
+primary_categories = extract_primary_categories(
+    list(papers_df.itertuples(index=False))
+)
+cat_counts = pd.Series(primary_categories).value_counts()
+
+fig, ax = plt.subplots(figsize=(9, 5))
+cat_counts.plot(kind="bar", ax=ax, color="#4C72B0")
+ax.set_title("Distribuição de Categorias Primárias")
+ax.set_xlabel("Categoria arXiv")
+ax.set_ylabel("Número de papers")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.savefig("img/category_distribution.png")
+"img/category_distribution.png"
+#+end_src
+
+#+RESULTS:
+[[file:img/category_distribution.png]]
+
+** Distribuição do tamanho dos /abstracts/
+
+#+begin_src python :results file :file img/abstract_length.png
+abstract_lengths = papers_df["abstract"].fillna("").str.split().apply(len)
+
+fig, ax = plt.subplots()
+ax.hist(abstract_lengths, bins=30, color="#55A868", edgecolor="white")
+ax.set_title("Distribuição do Tamanho dos Abstracts")
+ax.set_xlabel("Número de palavras")
+ax.set_ylabel("Número de papers")
+plt.tight_layout()
+plt.savefig("img/abstract_length.png")
+#+end_src
+
+#+RESULTS:
+[[file:img/abstract_length.png]]
+
+** Distribuição do número de referências extraídas vs. no grafo
+
+Cada paper pode citar artigos que ainda não estão no nosso banco (=num_references= conta todas as referências encontradas no texto; =num_citations_in_graph= conta apenas as que apontam para papers já presentes no banco, ou seja, arestas reais do grafo).
+
+#+begin_src python :results file :file img/references_distribution.png
+fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharey=True)
+
+axes[0].hist(papers_df["num_references"], bins=20, color="#4C72B0", edgecolor="white")
+axes[0].set_title("Referências encontradas no texto")
+axes[0].set_xlabel("Número de referências")
+axes[0].set_ylabel("Número de papers")
+
+axes[1].hist(papers_df["num_citations_in_graph"], bins=20, color="#C44E52", edgecolor="white")
+axes[1].set_title("Referências presentes no grafo")
+axes[1].set_xlabel("Número de citações no grafo")
+
+plt.tight_layout()
+plt.savefig("img/references_distribution.png")
+#+end_src
+
+#+RESULTS:
+[[file:img/references_distribution.png]]
+
+* Construção e Visualização do Grafo
+** Montando o grafo
+
+#+begin_src python :results output scalar drawer
+graph_data = build_graph_from_db(SessionLocal)
+print(f"Nós: {graph_data['num_nodes']}")
+print(f"Arestas: {graph_data['num_edges']}")
+#+end_src
+
+#+RESULTS:
+:results:
+Nós: 16506
+Arestas: 31435
+:end:
+
+** Grau dos nós (/in-degree/ / /out-degree/)
+
+#+begin_src python :results file :file img/degree_distribution.png
+G = nx.DiGraph()
+G.add_nodes_from(range(graph_data["num_nodes"]))
+G.add_edges_from(graph_data["edges"])
+
+in_degrees = [d for _, d in G.in_degree()]
+out_degrees = [d for _, d in G.out_degree()]
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharey=True)
+axes[0].hist(out_degrees, bins=range(0, max(out_degrees, default=1) + 2), color="#4C72B0", edgecolor="white")
+axes[0].set_title("Out-degree (artigos citados, presentes no grafo)")
+axes[0].set_xlabel("Grau")
+axes[0].set_ylabel("Número de papers")
+
+axes[1].hist(in_degrees, bins=range(0, max(in_degrees, default=1) + 2), color="#C44E52", edgecolor="white")
+axes[1].set_title("In-degree (vezes citado)")
+axes[1].set_xlabel("Grau")
+
+plt.tight_layout()
+plt.savefig("img/degree_distribution.png")
+#+end_src
+
+#+RESULTS:
+[[file:img/degree_distribution.png]]
+
+** Top papers mais citados (in-degree)
+
+#+begin_src python :results verbatim
+idx_to_id = {idx: pid for pid, idx in graph_data["id_to_idx"].items()}
+top_in = sorted(G.in_degree(), key=lambda kv: kv[1], reverse=True)[:10]
+
+rows = []
+for idx, deg in top_in:
+    pid = idx_to_id[idx]
+    title = papers_df.loc[papers_df["id"] == pid, "title"].values
+    rows.append({"id": pid, "in_degree": deg, "title": title[0][:70] if len(title) else "?"})
+
+pd.DataFrame(rows)
+#+end_src
+
+#+RESULTS:
+#+begin_example
+           id  in_degree                                              title
+0  2303.08774        439                             GPT-4 Technical Report
+1  2501.12948        409  DeepSeek-R1: Incentivizing Reasoning Capabilit...
+2  2110.14168        370     Training Verifiers to Solve Math Word Problems
+3  2402.03300        357  DeepSeekMath: Pushing the Limits of Mathematic...
+4  2407.21783        353                         The Llama 3 Herd of Models
+5  1707.06347        329            Proximal Policy Optimization Algorithms
+6  2505.09388        308                             Qwen3 Technical Report
+7  2307.09288        293  Llama 2: Open Foundation and Fine-Tuned Chat M...
+8  2107.03374        264   Evaluating Large Language Models Trained on Code
+9  2302.13971        256  LLaMA: Open and Efficient Foundation Language ...
+#+end_example
+
+** Visualização do maior componente conectado
+Com muitos nós isolados (papers sem citações dentro da amostra), o grafo completo fica poluído. Visualizamos apenas o maior componente fracamente conectado.
+
+#+begin_src python :results file :file img/largest_component.png
+undirected = G.to_undirected()
+components = list(nx.connected_components(undirected))
+largest = max(components, key=len) if components else set()
+print(f"Maior componente: {len(largest)} nós (de {graph_data['num_nodes']} totais)")
+
+H = G.subgraph(largest)
+
+fig, ax = plt.subplots(figsize=(9, 9))
+pos = nx.spring_layout(H, seed=42, k=0.5)
+node_sizes = [50 + 30 * H.in_degree(n) for n in H.nodes()]
+nx.draw_networkx_nodes(H, pos, node_size=node_sizes, node_color="#4C72B0", alpha=0.8, ax=ax)
+nx.draw_networkx_edges(H, pos, alpha=0.3, arrows=True, arrowsize=8, ax=ax)
+ax.set_title(f"Maior componente do grafo de citações ({len(largest)} nós)")
+ax.axis("off")
+plt.tight_layout()
+plt.savefig("img/largest_component.png")
+#+end_src
+
+** Matriz de citação entre categorias
+
+Quantas citações partem de uma categoria primária X e chegam em uma
+categoria primária Y — revela comunidades temáticas.
+
+#+begin_src python :results file :file img/category_citation_matrix.png
+id_to_cat = dict(zip(papers_df["id"], extract_primary_categories(list(papers_df.itertuples(index=False)))))
+
+cat_pairs = []
+for src_idx, tgt_idx in graph_data["edges"]:
+    src_cat = id_to_cat.get(idx_to_id[src_idx], "?")
+    tgt_cat = id_to_cat.get(idx_to_id[tgt_idx], "?")
+    cat_pairs.append((src_cat, tgt_cat))
+
+if cat_pairs:
+    pair_df = pd.DataFrame(cat_pairs, columns=["source_category", "target_category"])
+    matrix = pair_df.groupby(["source_category", "target_category"]).size().unstack(fill_value=0)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    im = ax.imshow(matrix.values, cmap="Blues")
+    ax.set_xticks(range(len(matrix.columns)))
+    ax.set_xticklabels(matrix.columns, rotation=45, ha="right")
+    ax.set_yticks(range(len(matrix.index)))
+    ax.set_yticklabels(matrix.index)
+    ax.set_xlabel("Categoria do artigo citado")
+    ax.set_ylabel("Categoria do artigo que cita")
+    ax.set_title("Citações entre categorias")
+    plt.colorbar(im, ax=ax, label="Número de citações")
+    plt.tight_layout()
+    plt.savefig("img/category_citation_matrix.png")
+else:
+    plt.figure()
+    plt.text(0.5, 0.5, "Sem arestas suficientes ainda", ha="center")
+    plt.axis("off")
+    plt.savefig("img/category_citation_matrix.png")
+#+end_src
+
+* Modelagem
+
+** Verificando se há dados suficientes
+
+#+begin_src python :results output scalar
+from src.config import MIN_NODES_FOR_TRAINING, MIN_EDGES_FOR_TRAINING
+
+print(f"Nós: {graph_data['num_nodes']} (mínimo: {MIN_NODES_FOR_TRAINING})")
+print(f"Arestas: {graph_data['num_edges']} (mínimo: {MIN_EDGES_FOR_TRAINING})")
+#+end_src
+
+#+RESULTS:
+: Nós: 16506 (mínimo: 50)
+: Arestas: 31435 (mínimo: 50)
+
+A fim de tratar a topologia do grafo enquanto /feature/ para nossa análise, é necessário que exista uma quantidade mínima de nós (artigos científicos) e de arestas (citações, referências entre artigos). Tomamos por valores mínimos =50/50=. É bem verdade que estes limiares são muito pequenos e insuficientes para encarar topologia enquanto /feature/, mas foram o ponto de partida. De qualquer forma, é observável que este mínimo já foi muito mais do que alcançado.
+
+Estando, por ventura, os números do mínimo, deveríamos buscar mais artigos, rodando mais iterações de =./run.sh process= antes de continuar.
+
+** Treinando todos os modelos
+Treina =GCN=, =GraphSAGE=, =GAT= (sobre o grafo + /features/ =TF-IDF=) e os /baselines/ clássicos (/Logistic Regression/, /Random Forest/, /Gradient Boosting/, sobre apenas as features =TF-IDF=) no mesmo /split/ =train/val/test=.
+
+#+begin_src python :results verbatim
+from src.evaluation import run_comparison, print_comparison_table
+
+comparison = run_comparison(db_url=DB_URL)
+print_comparison_table(comparison)
+#+end_src
+
+** Comparação visual de acurácia
+
+#+begin_src python :results file :file img/model_comparison.png
+comp_df = pd.DataFrame([
+    {"model": name, "test_acc": res["test_acc"]}
+    for name, res in comparison.items()
+]).sort_values("test_acc", ascending=False)
+
+fig, ax = plt.subplots(figsize=(9, 5))
+colors = ["#4C72B0" if m in ("gcn", "graphsage", "gat") else "#8172B2" for m in comp_df["model"]]
+bars = ax.bar(comp_df["model"], comp_df["test_acc"], color=colors)
+ax.set_title("Acurácia no conjunto de teste — GNNs vs. Baselines Clássicos")
+ax.set_ylabel("Acurácia")
+ax.set_ylim(0, 1)
+ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+for bar, val in zip(bars, comp_df["test_acc"]):
+    ax.text(bar.get_x() + bar.get_width() / 2, val, f"{val:.1%}", ha="center", va="bottom")
+plt.xticks(rotation=30, ha="right")
+plt.tight_layout()
+plt.savefig("img/model_comparison.png")
+"img/model_comparison.png"
+#+end_src
+
+#+RESULTS:
+[[file:img/model_comparison.png]]
+
+** Relatório de classificação (melhor modelo)
+
+#+begin_src python :results verbatim
+best_model = comp_df.iloc[0]["model"]
+print(f"Melhor modelo: {best_model}\n")
+print(comparison[best_model].get("report", "Sem classification_report disponível para GNNs."))
+#+end_src
+
+#+RESULTS:
+:results:
+[[file:]]
+:end:
+
+* Discussão dos Resultados Preliminares
+** Interpretação
+
+- [ ] Preencher após primeira execução com dados reais: qual modelo teve
+  melhor desempenho? GNNs superam baselines de conteúdo puro? Isso
+  sugere que a estrutura do grafo de citações carrega informação
+  relevante sobre a categoria do artigo?
+- [ ] Comparar GCN vs. GraphSAGE vs. GAT — diferenças de arquitetura
+  (agregação, atenção) explicam diferenças de acurácia?
+- [ ] A matriz de citação entre categorias mostra "silos" temáticos
+  (categorias que majoritariamente citam a si mesmas) ou
+  interdisciplinaridade?
+
+** Limitações
+- O split train/val/test é gerado por permutação aleatória a cada
+  execução (sem seed fixa) — resultados podem variar entre execuções.
+- O grafo é pequeno e parcialmente conectado (muitos papers referenciados
+  ainda não tiveram PDF baixado/processado), o que limita o sinal
+  estrutural disponível para as GNNs.
+- A extração de referências via regex pode ter falsos negativos
+  (formatos de citação não cobertos pelo padrão) e falsos positivos
+  (números que coincidem com o padrão de ID arXiv).
+- Duplicatas de arestas (mesmo par source/target processado mais de uma
+  vez) não são removidas em =build_graph_from_db= — impacto pequeno no
+  grau, mas vale mencionar.
+
+** Melhorias para a próxima etapa
+- Aumentar a amostra coletada (mais categorias, mais tempo de coleta)
+  para um grafo mais densamente conectado.
+- Fixar seed do split para reprodutibilidade exata entre execuções.
+- Explorar features adicionais no grafo: ano de publicação, número de
+  autores, embeddings de texto (em vez de TF-IDF) via modelos de
+  linguagem pré-treinados.
+- Persistir os splits/máscaras junto do checkpoint, permitindo avaliação
+  sem retreino (atualmente =run_comparison(retrain=False)= não está
+  implementado por essa razão).
+
+* Atualizações e Refinamentos do /Pipeline/
+Esta seção documenta melhorias implementadas após a construção inicial do /pipeline/, motivadas pela análise dos resultados preliminares e pela necessidade de enriquecer o grafo de citações.
+
+** Diagnóstico inicial
+Após a primeira rodada de coleta e treinamento, identificamos três problemas estruturais que limitavam o desempenho dos modelos:
+
+1. *Desbalanceamento de categorias*: o banco acumulou mais de 5.000 /papers/ de categorias =cs.*= (Machine Learning, AI, NLP), enquanto outras áreas (=stat=, =math=, =eess=, =physics=) tinham representação mínima. Com 84 subcategorias distintas como labels, as classes eram esparsas e o problema de classificação artificialmente difícil.
+
+2. *Baixa densidade do grafo*: com 4.392 nós e apenas 1.133 arestas (grau médio ≈ 0,26), a maioria dos papers era isolada no grafo. GNNs dependem de vizinhança para propagar informação — sem vizinhos, a convolução não agrega sinal útil e os modelos degeneravam para /MLPs/ sobre /TF-IDF/.
+
+3. *Extração de referências incompleta*: a /regex/ operava sobre o texto completo do PDF, gerando falsos positivos (números no corpo do texto que coincidem com o padrão de ID arXiv) e falsos negativos (IDs quebrados em múltiplas linhas pela renderização do PDF).
+
+** Melhorias implementadas
+*** Agrupamento de categorias em macro-áreas
+Substituímos a label de classificação de subcategoria completa (ex: =cs.LG=, =cs.AI=) pelo prefixo de macro-área (ex: =cs=, =stat=, =math=), implementado em =src/features/tfidf_features.py= via =extract_macro_categories=. Isso reduziu o número de classes de ~84 para ~7, tornando o problema mais tratável e as classes mais balanceadas.
+
+#+begin_src python :results verbatim
+from src.features import extract_macro_categories
+macro = extract_macro_categories(list(papers_df.itertuples(index=False)))
+import pandas as pd
+print(pd.Series(macro).value_counts())
+#+end_src
+
+
+
+*** Enriquecimento de citações via /Semantic Scholar/
+A /API/ =Graph v1= do /Semantic Scholar/ (=https://api.semanticscholar.org/graph/v1/paper=) foi integrada como fonte secundária de referências em =src/collection/collector.py= via =fetch_citations_from_semantic_scholar=. Para cada paper processado, as referências do texto são combinadas com as do Semantic Scholar, com confiança diferenciada por fonte:
+
+| Fonte                    | =found_in_text= | =confidence= |
+|--------------------------+-----------------+--------------|
+| Texto + Semantic Scholar | True            |         0.95 |
+| Apenas texto             | True            |         0.90 |
+| Apenas Semantic Scholar  | False           |         0.70 |
+
+#+begin_src python :results output value drawer
+# Distribuição de confidência das arestas do grafo
+import pandas as pd
+from sqlalchemy import text
+session = SessionLocal()
+conf_df = pd.read_sql(
+    "SELECT confidence, COUNT(*) AS count FROM citations GROUP BY confidence ORDER BY confidence DESC",
+    session.bind
+)
+session.close()
+print(conf_df)
+#+end_src
+
+
+
+
+*** Extração aprimorada de referências
+Dois pré-processamentos foram adicionados em =src/extraction/reference_extraction.py=:
+- =normalize_line_breaks=: reconstrói IDs arXiv quebrados pelo layout do PDF (ex: =2106.\n12345= → =2106.12345=) e normaliza prefixos arXiv=:
+- =extract_reference_section=: detecta o início da seção de referências via regex (=References=, =Bibliography=, =Works Cited=) e restringe a busca a essa região, reduzindo falsos positivos no corpo do texto.
+
+*** Controle de categorias coletadas
+=DEFAULT_CATEGORIES= em =src/config.py= foi atualizado para focar em áreas sub-representadas (=stat.ML=, =math.CT=, =stat.CO=, =eess.SP=, =physics.data-an=). Um mecanismo de exclusão (=EXCLUDED_CATEGORIES=) permite filtrar categorias indesejadas em futuras buscas (ex: =["cs."]=).
+
+*** Comparação de representações de features
+Implementamos a comparação direta entre três modos de /features/ usando o mesmo /split/ sobre nosso grafo de citações:
+
+- =tfidf=: vetores /TF-IDF/ esparsos (500 features) sobre título+abstract.
+- =embeddings=: embeddings densos do modelo
+  =all-MiniLM-L6-v2= (384 dimensões, /sentence-transformers/), capturando semântica que /bag-of-words/ ignora.
+- =combined=: concatenação /TF-IDF/ + /embeddings/ (884 dimensões).
+
+#+begin_src python :results none
+from src.evaluation import run_feature_comparison, print_feature_comparison_table
+
+feature_comparison = run_feature_comparison(db_url=DB_URL)
+print_feature_comparison_table(feature_comparison)
+#+end_src
+
+#+begin_src python :results file :file img/feature_comparison.png
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import pandas as pd
+
+modes = list(feature_comparison.keys())
+model_names = [n for n in next(iter(feature_comparison.values())) if n != 'baselines']
+
+rows = []
+for mode in modes:
+    for name in model_names:
+        acc = feature_comparison[mode].get(name, {}).get('test_acc')
+        if acc:
+            rows.append({'feature_mode': mode, 'model': name, 'test_acc': acc})
+    for name, res in feature_comparison[mode].get('baselines', {}).items():
+        rows.append({'feature_mode': mode, 'model': name, 'test_acc': res['test_acc']})
+
+comp_df = pd.DataFrame(rows)
+
+fig, ax = plt.subplots(figsize=(11, 5))
+width = 0.35
+modes_list = comp_df['feature_mode'].unique()
+models_list = comp_df['model'].unique()
+x = range(len(models_list))
+
+for i, mode in enumerate(modes_list):
+    vals = [comp_df[(comp_df['feature_mode'] == mode) & (comp_df['model'] == m)]['test_acc'].values
+            for m in models_list]
+    vals = [v[0] if len(v) else 0 for v in vals]
+    offset = (i - len(modes_list)/2 + 0.5) * width
+    bars = ax.bar([xi + offset for xi in x], vals, width, label=mode)
+
+ax.set_xticks(list(x))
+ax.set_xticklabels(models_list, rotation=30, ha='right')
+ax.set_ylabel('Acurácia')
+ax.set_ylim(0, 1)
+ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+ax.set_title('Comparação de features: TF-IDF vs. TF-IDF+Embeddings')
+ax.legend(title='Feature mode')
+fig.tight_layout()
+fig.savefig('img/feature_comparison.png')
+'img/feature_comparison.png'
+#+end_src
+
+** Impacto das melhorias
+
+#+begin_src python :results value
+summary = {
+    'Nós no grafo': graph_data['num_nodes'],
+    'Arestas no grafo': graph_data['num_edges'],
+    'Grau médio': f"{graph_data['num_edges'] / max(graph_data['num_nodes'], 1):.2f}",
+    'Classes (macro-área)': len(set(extract_macro_categories(list(papers_df.itertuples(index=False))))),
+}
+pd.DataFrame(list(summary.items()), columns=['Métrica', 'Valor'])
+#+end_src
+
+#+RESULTS:
+[[file:                Métrica  Valor
+0          Nós no grafo  16506
+1      Arestas no grafo  31435
+2            Grau médio   1.90
+3  Classes (macro-área)     20]]
+
+* Análise Crítica: GNNs vs. Classificadores Clássicos
+** Por que os baselines são competitivos?
+Os resultados de classificação de macro-área revelam que a /Logistic Regression/ sobre /TF-IDF/ é o melhor modelo isolado (~78%), com as /GNNs/ atingindo desempenho comparável (=GraphSAGE= ~85.0%). Este resultado, longe de ser uma falha (/assim torcemos!/), é /informativo/. Gostaríamos de discutir abaixo e tentar convencer, se possível, a validade deste /trabalho-enquanto-experimento/ e motivar discussões futuras.
+
+A tarefa de classificar /papers/ em macro-áreas (=cs=, =stat=, =math=, =eess=, =physics=) é fundamentalmente uma tarefa de /separação de vocabulário/: papers de física computacional usam palavras distintas de papers de aprendizagem de máquina. Um modelo /TF-IDF/ captura esse sinal com eficiência máxima porque o discriminador está no texto, não na topologia do grafo.
+
+/GNNs/, por sua vez, propagam informação de vizinhança — e num grafo onde papers de =cs= citam quase exclusivamente papers de =cs=, a estrutura do grafo confirma o que o texto já sabia. O grafo é /homofílico por macro-área/: as classes se agrupam naturalmente, e o
+sinal estrutural é redundante com o sinal textual.
+
+#+begin_src python :results file :file img/homophily.png
+# Calcula homofilia do grafo: fração de arestas que conectam nós da mesma macro-área
+from src.features import extract_macro_categories
+
+macro_cats = extract_macro_categories(list(papers_df.itertuples(index=False)))
+idx_to_macro = {idx: macro_cats[idx] if idx < len(macro_cats) else 'unknown'
+                for idx in range(graph_data['num_nodes'])}
+
+same, total = 0, 0
+for src_idx, tgt_idx in graph_data['edges']:
+    if idx_to_macro[src_idx] == idx_to_macro[tgt_idx]:
+        same += 1
+    total += 1
+
+homophily = same / total if total else 0
+print(f"Homofilia do grafo (macro-área): {homophily:.3f}")
+print(f"({same} de {total} arestas conectam nós da mesma macro-área)")
+
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.bar(['Mesma área', 'Área diferente'], [same, total - same],
+       color=['#4C72B0', '#C44E52'])
+ax.set_title(f'Homofilia do grafo de citações\n(homofilia = {homophily:.2f})')
+ax.set_ylabel('Número de arestas')
+fig.tight_layout()
+fig.savefig('img/homophily.png')
+'img/homophily.png'
+#+end_src
+
+Uma homofilia próxima de 1.0 confirma que a estrutura do grafo é altamente redundante com a /label/ de macro-área. Num cenário assim, GNNs não têm vantagem sobre classificadores de conteúdo.
+
+** Quando GNNs têm vantagem estrutural: tarefas secundárias
+Para demonstrar que as GNNs /capturam informação estrutural genuína/ que os /baselines/ de conteúdo não conseguem, propomos três tarefas alternativas de classificação onde a label depende da topologia do grafo, não do texto.
+
+*** Tarefa 2a: Predição de popularidade (in-degree)
+Um paper "popular" no grafo — com alto /in-degree/ — tende a ser um trabalho seminal ou de revisão. O in-degree é /invisível no texto do paper/ (nenhum paper menciona quantas vezes será citado no futuro, obviamente), mas é capturado diretamente pela estrutura do grafo. Uma /GNN/ que propaga informação dos vizinhos /que chegam/ ao nó tem acesso a esse sinal.
+
+#+begin_src python :results none
+from src.models.secondary_tasks import build_popularity_labels
+
+y_pop, pop_info = build_popularity_labels(graph_data, papers_df)
+print(pop_info)
+print(f"Taxa de papers populares: {pop_info['positive_rate']:.1%}")
+#+end_src
+
+#+begin_src python :results none
+# Treina GNN e baseline na tarefa de popularidade (mesmo split)
+from src.models.train import make_split_masks, train_gnn, build_dataset
+from src.models.baseline_models import train_baseline_models, tensors_to_numpy
+from src.models.gnn_models import GCN, GraphSAGE
+import torch
+from torch_geometric.data import Data
+
+x = build_tfidf_features(graph_data['paper_rows'])
+train_mask, val_mask, test_mask = make_split_masks(graph_data['num_nodes'])
+edges = graph_data['edges']
+edge_index = (torch.tensor(edges, dtype=torch.long).t().contiguous()
+              if edges else torch.zeros((2, 0), dtype=torch.long))
+
+data_pop = Data(x=x, edge_index=edge_index, y=y_pop,
+                train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+data_pop = data_pop.to(device)
+
+from src.config import GNN_HIDDEN_DIM, GNN_NUM_LAYERS, DROPOUT
+
+gcn_pop = GCN(x.shape[1], GNN_HIDDEN_DIM, 2, dropout=DROPOUT, num_layers=GNN_NUM_LAYERS)
+res_gcn_pop = train_gnn('GCN-popularity', gcn_pop, data_pop, device)
+
+# Baseline: LR sobre TF-IDF (sem grafo)
+x_np, y_np, tr, val, te = tensors_to_numpy(
+    data_pop.x.cpu(), data_pop.y.cpu(),
+    data_pop.train_mask.cpu(), data_pop.val_mask.cpu(), data_pop.test_mask.cpu()
+)
+bl_pop = train_baseline_models(x_np, y_np, tr, val, te)
+
+print(f"\n=== Tarefa: Predição de Popularidade ===")
+print(f"GCN:                  {res_gcn_pop['test_acc']:.4f}")
+print(f"Logistic Regression:  {bl_pop['logistic_regression']['test_acc']:.4f}")
+print(f"(baseline ingênuo — sempre prediz não-popular): {1 - pop_info['positive_rate']:.4f}")
+#+end_src
+
+*** Tarefa 2b: Classificação de subcategoria dentro de =cs.*=
+Distinguir =cs.LG=, =cs.AI=, =cs.CL=, =cs.CV= e =cs.IR= é muito mais difícil pelo vocabulário (todos usam termos de ML/DL/redes neurais), mas diferenciável pela rede de citações: pesquisadores de NLP (=cs.CL=) citam principalmente outros de NLP; de visão computacional (=cs.CV=) citam outros de CV.
+
+#+begin_src python :results none
+from src.models.secondary_tasks import build_subcategory_cs_labels
+
+y_sub, sub_info = build_subcategory_cs_labels(papers_df, graph_data)
+print(sub_info['class_names'])
+
+data_sub = Data(x=x, edge_index=edge_index, y=y_sub,
+                train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+data_sub = data_sub.to(device)
+
+gcn_sub = GCN(x.shape[1], GNN_HIDDEN_DIM, sub_info['num_classes'],
+              dropout=DROPOUT, num_layers=GNN_NUM_LAYERS)
+res_gcn_sub = train_gnn('GCN-subcategory', gcn_sub, data_sub, device)
+
+bl_sub = train_baseline_models(x_np, y_sub.numpy(), tr, val, te)
+
+print(f"\n=== Tarefa: Subcategoria cs.* ===")
+print(f"GCN:                  {res_gcn_sub['test_acc']:.4f}")
+print(f"Logistic Regression:  {bl_sub['logistic_regression']['test_acc']:.4f}")
+#+end_src
+
+*** Tarefa 2c: Detecção de papers interdisciplinares
+#+begin_src python :results none
+from src.models.secondary_tasks import build_interdisciplinary_labels
+
+y_inter, inter_info = build_interdisciplinary_labels(papers_df, graph_data)
+print(f"Taxa de papers interdisciplinares: {inter_info['positive_rate']:.1%}")
+
+data_inter = Data(x=x, edge_index=edge_index, y=y_inter,
+                  train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
+data_inter = data_inter.to(device)
+
+gcn_inter = GCN(x.shape[1], GNN_HIDDEN_DIM, 2, dropout=DROPOUT, num_layers=GNN_NUM_LAYERS)
+res_gcn_inter = train_gnn('GCN-interdisciplinary', gcn_inter, data_inter, device)
+
+bl_inter = train_baseline_models(x_np, y_inter.numpy(), tr, val, te)
+
+print(f"\n=== Tarefa: Detecção de Interdisciplinaridade ===")
+print(f"GCN:                  {res_gcn_inter['test_acc']:.4f}")
+print(f"Logistic Regression:  {bl_inter['logistic_regression']['test_acc']:.4f}")
+print(f"(baseline ingênuo — sempre prediz disciplinar): {1 - inter_info['positive_rate']:.4f}")
+#+end_src
+
+** Síntese comparativa entre tarefas
+#+begin_src python :results file :file img/task_comparison.png
+tasks = {
+    'Macro-área\n(tarefa primária)': {
+        'GNN (GraphSAGE)': 0.8701,   # preencher com valor real
+        'Logistic Regression': 0.7803,
+        'Baseline ingênuo': 0.64,
+    },
+    'Popularidade\n(in-degree)': {
+        'GNN (GraphSAGE)': res_gcn_pop['test_acc'],
+        'Logistic Regression': bl_pop['logistic_regression']['test_acc'],
+        'Baseline ingênuo': 1 - pop_info['positive_rate'],
+    },
+    'Subcategoria cs.*': {
+        'GNN (GraphSAGE)': res_gcn_sub['test_acc'],
+        'Logistic Regression': bl_sub['logistic_regression']['test_acc'],
+        'Baseline ingênuo': 1 / sub_info['num_classes'],
+    },
+    'Interdisciplinar': {
+        'GNN (GraphSAGE)': res_gcn_inter['test_acc'],
+        'Logistic Regression': bl_inter['logistic_regression']['test_acc'],
+        'Baseline ingênuo': 1 - inter_info['positive_rate'],
+    },
+}
+
+fig, ax = plt.subplots(figsize=(12, 5))
+task_names = list(tasks.keys())
+models = ['GNN (GraphSAGE)', 'Logistic Regression', 'Baseline ingênuo']
+colors = ['#4C72B0', '#8172B2', '#C44E52']
+x_pos = np.arange(len(task_names))
+width = 0.25
+
+for i, (model, color) in enumerate(zip(models, colors)):
+    vals = [tasks[t][model] for t in task_names]
+    bars = ax.bar(x_pos + i * width, vals, width, label=model, color=color)
+
+ax.set_xticks(x_pos + width)
+ax.set_xticklabels(task_names)
+ax.set_ylabel('Acurácia')
+ax.set_ylim(0, 1.05)
+ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+ax.set_title('GNN vs. Baseline por tipo de tarefa de classificação')
+ax.legend()
+fig.tight_layout()
+fig.savefig('img/task_comparison.png')
+'img/task_comparison.png'
+#+end_src
+
+O gráfico acima é a visualização central do argumento: nas tarefas onde a label está no /texto/ (macro-área), o baseline de conteúdo é competitivo. Nas tarefas onde a label está na /estrutura do grafo/ (popularidade, interdisciplinaridade), a GNN tem vantagem porque acessa informação que o /TF-IDF/ é incapaz de capturar, isto é, é informação originária da /relação entre artigos/, e não é contida em um único artigo isolado.

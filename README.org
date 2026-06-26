@@ -1,0 +1,142 @@
+#+TITLE: arXiv Citation Graph
+#+AUTHOR: Nícolas Rosenthal Dal Corso
+#+OPTIONS: toc:2 num:t
+
+Este projeto constitui o trabalho final da disciplina de Ciência de Dados (INF 1090), no semestre 2026-1.
+Seu objetivo principal é estudar redes neurais baseadas em grafos e comparar seus resultados enquanto modelos de classificação contra estratégias clássicas, baseadas em [tf-idf](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) ou [word embeddings](https://en.wikipedia.org/wiki/Word_embedding).
+
+
+Como prova de conceito, analisados e obtivemos resultados positivos ao analisar o [*dataset* Cora](https://graphsandnetworks.com/the-cora-dataset/). Este *dataset* é apto para a construção de um *grafo de citações*. Os modelos de redes neurais baseados em grafos se saíram melhor (=23%= melhor, comparando o melhor caso das GNNs contra o pior caso dos modelos tradicionais) do que os outros classificadores.
+
+
+Motivado pelo retorno positivo, foi decidido avançar mais um passo e tentar aplicar os modelos baseados em redes neurais a um objeto do mundo real: o [serviço de acesso e distribuição abertos à artigos científicos, arXiv](https://arxiv.org/).
+
+
+Foi implementado um sistema de coleta contínua de artigos do arXiv, construção de um grafo de citações *on-line* e treinamento de modelos de classificação de categoria (área de pesquisa) sobre esse grafo, comparando três modelos distintos de redes neurais baseadas em grafos ([Graph Convonlutional Network, GCN](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GCN.html), [GraphSAGE](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GraphSAGE.html#torch_geometric.nn.models.GraphSAGE), [Graph Attention Network, GAT](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GAT.html#torch_geometric.nn.models.GAT)) com *baselines* clássicos ([Regressão Logística](https://en.wikipedia.org/wiki/Logistic_regression), [Random Forest](https://en.wikipedia.org/wiki/Random_forest), e [Gradient Boosting](https://en.wikipedia.org/wiki/Gradient_boosting)) treinados sobre *features* =TF-IDF= e sobre =TF+IDF + embeddings=.
+
+O sistema conta com um cliente à API arXiv, extrator de referências dos textos a partir de expressões regulares, um pequeno banco de dados para armazenamento dos dados extraídos dos artigos, bem como das métricas dos modelos e da fila de processamento, métodos para construção do grafo de citações e um *dashboard*, através do qual podemos acompanhar os processos de extração, processamento dos dados, montagem do grafo de citações e as métricas dos classificadores que estão sendo treinados.
+
+Todas as funcionalidades são transparentes a um *script* orquestrador (=run.sh=, veja também =cli.py=), o que permite operacionalizar todo o sistema de forma direta e simples.
+
+* *notebooks*
+1. [000-planetoid-classificadores-tradicionais-vs-gnn.ipynb](notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.ipynb) e [000-planetoid-classificadores-tradicionais-vs-gnn.org](notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.org) foram os primeiros *notebooks* desenvolvidos e demonstram a prova de conceito contra o *dataset* Cora. A versão =.ipynb= é bastante reduzida, mas permite visualizar os resultados, enquanto a =.org= apresenta maior discussão e possibilidades futuras de trabalho;
+2. [001-eda-modelagem-e-resultados.org](notebooks/001-eda-modelagem-e-resultados.org) é o registro principal do desenvolvimento da segunda etapa do projeto, a análise e implementação do sistema de coleção supervisionada dos artigos do arXiv, da construção do grafo de citações e dos modelos de classificação; e
+3. [002-tipos-e-modelagem-de-dados.org](notebooks/002-tipos-e-modelagem-de-dados.org) é um breve registro da construção do banco de dados utilizado pelo projeto.
+
+
+* Estrutura do projeto
+#+begin_example
+.
+├── README.org
+├── requirements.txt
+├── run.sh                    # orquestrador do pipeline
+├── cli.py                    # entrypoint único (python cli.py <comando>)
+│
+├── data/
+│   ├── pdfs/                 # PDFs baixados do arXiv
+│   ├── texts/                # texto extraído dos PDFs
+│   ├── graphs/
+│   └── arxiv_continuous.db   # banco SQLite
+│
+├── models/                   # checkpoints (.pt) dos modelos treinados
+│
+├── src/
+│   ├── config.py             # paths, hiperparâmetros, categorias arXiv
+│   ├── db/                   # modelos ORM e sessão (SQLAlchemy)
+│   ├── collection/           # cliente arXiv + coletor (busca, download, fila)
+│   ├── extraction/           # extração de texto (PyMuPDF) e referências (regex)
+│   ├── graph/                # construção do grafo de citações
+│   ├── features/             # features TF-IDF e labels de categoria
+│   ├── models/               # GCN, GraphSAGE, GAT, baselines, treino
+│   ├── evaluation/           # comparação entre modelos
+│   ├── dashboard/            # dashboard Streamlit
+│   └── api/                  # API FastAPI
+│
+└── notebooks/                # cadernos de programação literária
+                              # sobre o desenvolvimento do estudo
+#+end_example
+
+* Setup
+
+#+begin_src bash
+./run.sh setup
+#+end_src
+
+Cria o ambiente virtual (=.venv=), instala dependências de =requirements.txt= e cria os diretórios de dados.
+
+* Uso
+** Coleta contínua
+
+#+begin_src bash
+./run.sh collect
+#+end_src
+
+Busca novos artigos no arXiv periodicamente e baixa PDFs em background.
+
+** Processar dados locais
+
+#+begin_src bash
+./run.sh process
+#+end_src
+
+Registra no banco todos os PDFs já presentes em =data/pdfs/=, extrai texto (PyMuPDF) e referências (regex), populando a tabela de citações.
+
+** Treinar modelos
+
+#+begin_src bash
+./run.sh train
+
+#  para treinar todos os modelos com ti-idf e com ti-idf+embeddings
+./run.sh compare-features
+#+end_src
+
+Treina GCN, GraphSAGE e GAT sobre o grafo de citações, além dos baselines clássicos (Logistic Regression, Random Forest, Gradient Boosting) sobre features TF-IDF. Salva checkpoints em =models/=.
+
+** Comparar modelos
+
+#+begin_src bash
+./run.sh evaluate
+#+end_src
+
+Treina e imprime uma tabela comparativa de acurácia entre todos os modelos.
+
+** Pipeline completo
+
+#+begin_src bash
+./run.sh all
+#+end_src
+
+Equivalente a =process= → =train= → =evaluate=.
+
+** Dashboard e API
+
+#+begin_src bash
+./run.sh dashboard   # Streamlit em http://localhost:8501
+./run.sh api         # FastAPI em http://localhost:8001
+#+end_src
+
+* Pipeline de dados
+
+1. *Coleta* (=src/collection=): busca metadados via API do arXiv com rate
+   limiting (~1 req/3.5s), baixa PDFs.
+2. *Extração* (=src/extraction=): extrai texto dos PDFs (PyMuPDF) e
+   identifica referências a outros artigos arXiv via regex.
+3. *Grafo* (=src/graph=): constrói o grafo de citações a partir da tabela
+   de papers e citações no banco.
+4. *Features* (=src/features=): vetoriza título+abstract via TF-IDF e
+   extrai a categoria primária de cada paper como label.
+5. *Modelagem* (=src/models=): treina GCN, GraphSAGE, GAT (classificação
+   de categoria via mensagens no grafo) e baselines clássicos sobre as
+   mesmas features/labels e split train/val/test.
+6. *Avaliação* (=src/evaluation=): compara acurácia de todos os modelos no
+   conjunto de teste.
+
+* Configuração
+
+Todos os parâmetros (paths, categorias arXiv monitoradas, hiperparâmetros de treino, regex de extração) estão centralizados em =src/config.py=.
+
+* Limitações e trabalhos futuros
+
+- A coleta contínua depende de disponibilidade da API do arXiv e está sujeita a rate limiting; resultados reportados no notebook usam um snapshot estático do banco. Tentamos respeitar as regras da API arXiv estabelecendo =5 s= entre requisições (a recomendação é =3 s/request=).
+- O split =train/val/test= é uma máscara que realiza uma divisão do grafo considerando o maior elemento conexo e tentando balancear as classes conforme pesos definidos dinamicamente.
+- Dashboard e API são infraestrutura de monitoramento/exposição dos dados e não são necessários para reproduzir os resultados do notebook.
