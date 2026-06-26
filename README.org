@@ -1,28 +1,25 @@
 #+TITLE: arXiv Citation Graph
 #+AUTHOR: Nícolas Rosenthal Dal Corso
-#+OPTIONS: toc:2 num:t
+#+OPTIONS: toc:2 num:t ^:nil
+#+LANGUAGE: pt-BR
 
 Este projeto constitui o trabalho final da disciplina de Ciência de Dados (INF 1090), no semestre 2026-1.
-Seu objetivo principal é estudar redes neurais baseadas em grafos e comparar seus resultados enquanto modelos de classificação contra estratégias clássicas, baseadas em [tf-idf](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) ou [word embeddings](https://en.wikipedia.org/wiki/Word_embedding).
+Seu objetivo principal é estudar redes neurais baseadas em grafos e comparar seus resultados enquanto modelos de classificação contra estratégias clássicas, baseadas em [[https://en.wikipedia.org/wiki/Tf%E2%80%93idf][TF-IDF]] ou [[https://en.wikipedia.org/wiki/Word_embedding][word embeddings]].
 
+Como prova de conceito, analisamos e obtivemos resultados positivos ao analisar o [[https://graphsandnetworks.com/the-cora-dataset/][dataset Cora]]. Este /dataset/ é apto para a construção de um /grafo de citações/. Os modelos de redes neurais baseados em grafos se saíram melhor (23% melhor, comparando o melhor caso das GNNs contra o pior caso dos modelos tradicionais) do que os outros classificadores.
 
-Como prova de conceito, analisados e obtivemos resultados positivos ao analisar o [*dataset* Cora](https://graphsandnetworks.com/the-cora-dataset/). Este *dataset* é apto para a construção de um *grafo de citações*. Os modelos de redes neurais baseados em grafos se saíram melhor (=23%= melhor, comparando o melhor caso das GNNs contra o pior caso dos modelos tradicionais) do que os outros classificadores.
+Motivado pelo retorno positivo, foi decidido avançar mais um passo e tentar aplicar os modelos baseados em redes neurais a um objeto do mundo real: o [[https://arxiv.org/][serviço de acesso e distribuição abertos a artigos científicos, arXiv]].
 
+Foi implementado um sistema de coleta contínua de artigos do arXiv, construção de um grafo de citações /on-line/ e treinamento de modelos de classificação de categoria (área de pesquisa) sobre esse grafo, comparando três modelos distintos de redes neurais baseadas em grafos ([[https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GCN.html][Graph Convolutional Network, GCN]], [[https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GraphSAGE.html][GraphSAGE]], [[https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GAT.html][Graph Attention Network, GAT]]) com /baselines/ clássicos ([[https://en.wikipedia.org/wiki/Logistic_regression][Regressão Logística]], [[https://en.wikipedia.org/wiki/Random_forest][Random Forest]], e [[https://en.wikipedia.org/wiki/Gradient_boosting][Gradient Boosting]]) treinados sobre features =TF-IDF= e sobre =TF-IDF + embeddings=.
 
-Motivado pelo retorno positivo, foi decidido avançar mais um passo e tentar aplicar os modelos baseados em redes neurais a um objeto do mundo real: o [serviço de acesso e distribuição abertos à artigos científicos, arXiv](https://arxiv.org/).
+O sistema conta com um cliente à API arXiv, extrator de referências dos textos a partir de expressões regulares, um pequeno banco de dados para armazenamento dos dados extraídos dos artigos, bem como das métricas dos modelos e da fila de processamento, métodos para construção do grafo de citações e um /dashboard/, através do qual podemos acompanhar os processos de extração, processamento dos dados, montagem do grafo de citações e as métricas dos classificadores que estão sendo treinados.
 
+Todas as funcionalidades são transparentes a um /script/ orquestrador (=run.sh=, veja também =cli.py=), o que permite operacionalizar todo o sistema de forma direta e simples.
 
-Foi implementado um sistema de coleta contínua de artigos do arXiv, construção de um grafo de citações *on-line* e treinamento de modelos de classificação de categoria (área de pesquisa) sobre esse grafo, comparando três modelos distintos de redes neurais baseadas em grafos ([Graph Convonlutional Network, GCN](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GCN.html), [GraphSAGE](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GraphSAGE.html#torch_geometric.nn.models.GraphSAGE), [Graph Attention Network, GAT](https://pytorch-geometric.readthedocs.io/en/2.7.0/generated/torch_geometric.nn.models.GAT.html#torch_geometric.nn.models.GAT)) com *baselines* clássicos ([Regressão Logística](https://en.wikipedia.org/wiki/Logistic_regression), [Random Forest](https://en.wikipedia.org/wiki/Random_forest), e [Gradient Boosting](https://en.wikipedia.org/wiki/Gradient_boosting)) treinados sobre *features* =TF-IDF= e sobre =TF+IDF + embeddings=.
-
-O sistema conta com um cliente à API arXiv, extrator de referências dos textos a partir de expressões regulares, um pequeno banco de dados para armazenamento dos dados extraídos dos artigos, bem como das métricas dos modelos e da fila de processamento, métodos para construção do grafo de citações e um *dashboard*, através do qual podemos acompanhar os processos de extração, processamento dos dados, montagem do grafo de citações e as métricas dos classificadores que estão sendo treinados.
-
-Todas as funcionalidades são transparentes a um *script* orquestrador (=run.sh=, veja também =cli.py=), o que permite operacionalizar todo o sistema de forma direta e simples.
-
-* *notebooks*
-1. [000-planetoid-classificadores-tradicionais-vs-gnn.ipynb](notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.ipynb) e [000-planetoid-classificadores-tradicionais-vs-gnn.org](notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.org) foram os primeiros *notebooks* desenvolvidos e demonstram a prova de conceito contra o *dataset* Cora. A versão =.ipynb= é bastante reduzida, mas permite visualizar os resultados, enquanto a =.org= apresenta maior discussão e possibilidades futuras de trabalho;
-2. [001-eda-modelagem-e-resultados.org](notebooks/001-eda-modelagem-e-resultados.org) é o registro principal do desenvolvimento da segunda etapa do projeto, a análise e implementação do sistema de coleção supervisionada dos artigos do arXiv, da construção do grafo de citações e dos modelos de classificação; e
-3. [002-tipos-e-modelagem-de-dados.org](notebooks/002-tipos-e-modelagem-de-dados.org) é um breve registro da construção do banco de dados utilizado pelo projeto.
-
+* Notebooks
+1. [[notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.ipynb][000-planetoid-classificadores-tradicionais-vs-gnn.ipynb]] e [[notebooks/000-planetoid-classificadores-tradicionais-vs-gnn.org][000-planetoid-classificadores-tradicionais-vs-gnn.org]] foram os primeiros /notebooks/ desenvolvidos e demonstram a prova de conceito contra o /dataset/ Cora. A versão =.ipynb= é bastante reduzida, mas permite visualizar os resultados, enquanto a =.org= apresenta maior discussão e possibilidades futuras de trabalho;
+2. [[notebooks/001-eda-modelagem-e-resultados.org][001-eda-modelagem-e-resultados.org]] é o registro principal do desenvolvimento da segunda etapa do projeto, a análise e implementação do sistema de coleção supervisionada dos artigos do arXiv, da construção do grafo de citações e dos modelos de classificação; e
+3. [[notebooks/002-tipos-e-modelagem-de-dados.org][002-tipos-e-modelagem-de-dados.org]] é um breve registro da construção do banco de dados utilizado pelo projeto.
 
 * Estrutura do projeto
 #+begin_example
@@ -86,7 +83,7 @@ Registra no banco todos os PDFs já presentes em =data/pdfs/=, extrai texto (PyM
 #+begin_src bash
 ./run.sh train
 
-#  para treinar todos os modelos com ti-idf e com ti-idf+embeddings
+# para treinar todos os modelos com tf-idf e com tf-idf+embeddings
 ./run.sh compare-features
 #+end_src
 

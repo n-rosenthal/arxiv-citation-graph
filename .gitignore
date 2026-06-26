@@ -5,3 +5,5 @@
 .venv
 .vscode
 .mypy_cache
+data/texts/texts.tar.xz
+data/arxiv_continuous.db
