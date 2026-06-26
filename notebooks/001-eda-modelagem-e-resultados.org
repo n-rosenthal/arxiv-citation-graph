@@ -366,24 +366,7 @@ print(f"Melhor modelo: {best_model}\n")
 print(comparison[best_model].get("report", "Sem classification_report disponível para GNNs."))
 #+end_src
 
-#+RESULTS:
-:results:
-[[file:]]
-:end:
-
 * Discussão dos Resultados Preliminares
-** Interpretação
-
-- [ ] Preencher após primeira execução com dados reais: qual modelo teve
-  melhor desempenho? GNNs superam baselines de conteúdo puro? Isso
-  sugere que a estrutura do grafo de citações carrega informação
-  relevante sobre a categoria do artigo?
-- [ ] Comparar GCN vs. GraphSAGE vs. GAT — diferenças de arquitetura
-  (agregação, atenção) explicam diferenças de acurácia?
-- [ ] A matriz de citação entre categorias mostra "silos" temáticos
-  (categorias que majoritariamente citam a si mesmas) ou
-  interdisciplinaridade?
-
 ** Limitações
 - O split train/val/test é gerado por permutação aleatória a cada
   execução (sem seed fixa) — resultados podem variar entre execuções.
@@ -432,7 +415,6 @@ print(pd.Series(macro).value_counts())
 #+end_src
 
 
-
 *** Enriquecimento de citações via /Semantic Scholar/
 A /API/ =Graph v1= do /Semantic Scholar/ (=https://api.semanticscholar.org/graph/v1/paper=) foi integrada como fonte secundária de referências em =src/collection/collector.py= via =fetch_citations_from_semantic_scholar=. Para cada paper processado, as referências do texto são combinadas com as do Semantic Scholar, com confiança diferenciada por fonte:
 
@@ -454,9 +436,6 @@ conf_df = pd.read_sql(
 session.close()
 print(conf_df)
 #+end_src
-
-
-
 
 *** Extração aprimorada de referências
 Dois pré-processamentos foram adicionados em =src/extraction/reference_extraction.py=:
@@ -685,7 +664,7 @@ print(f"(baseline ingênuo — sempre prediz disciplinar): {1 - inter_info['posi
 #+begin_src python :results file :file img/task_comparison.png
 tasks = {
     'Macro-área\n(tarefa primária)': {
-        'GNN (GraphSAGE)': 0.8701,   # preencher com valor real
+        'GNN (GraphSAGE)': 0.8701,
         'Logistic Regression': 0.7803,
         'Baseline ingênuo': 0.64,
     },
