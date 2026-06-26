@@ -6,7 +6,7 @@
 Este projeto constitui o trabalho final da disciplina de Ciência de Dados (INF 1090), no semestre 2026-1.
 Seu objetivo principal é estudar redes neurais baseadas em grafos e comparar seus resultados enquanto modelos de classificação contra estratégias clássicas, baseadas em [[https://en.wikipedia.org/wiki/Tf%E2%80%93idf][TF-IDF]] ou [[https://en.wikipedia.org/wiki/Word_embedding][word embeddings]].
 
-Como prova de conceito, analisamos e obtivemos resultados positivos ao analisar o [[https://graphsandnetworks.com/the-cora-dataset/][dataset Cora]]. Este /dataset/ é apto para a construção de um /grafo de citações/. Os modelos de redes neurais baseados em grafos se saíram melhor (23% melhor, comparando o melhor caso das GNNs contra o pior caso dos modelos tradicionais) do que os outros classificadores.
+Como prova de conceito, analisamos e obtivemos resultados positivos com o conjunto de dados do [[https://graphsandnetworks.com/the-cora-dataset/][dataset Cora]]. Este /dataset/ é apto para a construção de um /grafo de citações/. Os modelos de redes neurais baseados em grafos se saíram melhor (23% melhor, comparando o melhor caso das GNNs contra o pior caso dos modelos tradicionais) do que os outros classificadores.
 
 Motivado pelo retorno positivo, foi decidido avançar mais um passo e tentar aplicar os modelos baseados em redes neurais a um objeto do mundo real: o [[https://arxiv.org/][serviço de acesso e distribuição abertos a artigos científicos, arXiv]].
 
